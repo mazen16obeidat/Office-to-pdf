@@ -21,10 +21,9 @@ A simple, one-click Windows application that converts Microsoft Office documents
 
 ### Option 1: Download the .exe (Recommended for Everyone)
 
-1. **[Click here to download FamilyPDFTool.exe](../../raw/main/FamilyPDFTool.exe)**
-2. Save the file anywhere (Desktop is fine)
-3. Double-click to run
-4. Select your Office document and click **Convert to PDF**
+1. Save the file anywhere (Desktop is fine)
+2. Double-click to run
+3. Select your Office document and click **Convert to PDF**
 
 ✅ That's it! No Python, no installers, no command line.
 
