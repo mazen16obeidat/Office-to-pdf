@@ -7,7 +7,8 @@ from tkinterdnd2 import DND_FILES, TkinterDnD  # for drag & drop
 
 try:
     import win32com.client
-    import pythoncom  # Required for multithreaded COM automation
+    import win32com.client.dynamic
+    import pythoncom
 except ImportError:
     root = tk.Tk()
     root.withdraw()
@@ -44,49 +45,39 @@ FILE_DIALOG_PATTERNS = [
 # ---------- Core Conversion Logic ----------
 def convert_office_to_pdf_safe(input_path, output_path, office_app):
     """Convert a file using the appropriate Office application in a thread-safe context."""
-    # COM servers require absolute, normalized Windows paths
     abs_input = os.path.abspath(input_path)
     abs_output = os.path.abspath(output_path)
 
-    # Initialize COM library for the background thread
     pythoncom.CoInitialize()
 
     app = None
     doc = None
     try:
-        app = win32com.client.Dispatch(f"{office_app}.Application")
+        app = win32com.client.dynamic.Dispatch(f"{office_app}.Application")
 
         if office_app == "Word":
             app.Visible = False
-            app.DisplayAlerts = 0  # wdAlertsNone (suppress conversion prompts)
-            doc = app.Documents.Open(
-                abs_input,
-                ReadOnly=True,
-                ConfirmConversions=False,
-                AddToRecentFiles=False
-            )
-            doc.ExportAsFixedFormat(abs_output, ExportFormat=17)  # wdExportFormatPDF = 17
+            app.DisplayAlerts = 0  # wdAlertsNone
+            # Positional args: FileName, ConfirmConversions, ReadOnly, AddToRecentFiles
+            doc = app.Documents.Open(abs_input, False, True, False)
+            doc.ExportAsFixedFormat(abs_output, 17)  # wdExportFormatPDF = 17
 
         elif office_app == "Excel":
             app.Visible = False
             app.DisplayAlerts = False
-            doc = app.Workbooks.Open(
-                abs_input,
-                ReadOnly=True,
-                UpdateLinks=0,
-                AddToMru=False
-            )
+            # Positional args: Filename, UpdateLinks, ReadOnly
+            doc = app.Workbooks.Open(abs_input, 0, True)
             doc.ExportAsFixedFormat(0, abs_output)  # xlTypePDF = 0
 
         elif office_app == "PowerPoint":
-            app.DisplayAlerts = 1  # ppAlertsNone = 1
-            doc = app.Presentations.Open(
-                abs_input,
-                ReadOnly=True,
-                Untitled=False,
-                WithWindow=False
-            )
-            doc.ExportAsFixedFormat(abs_output, 32)  # ppSaveAsPDF = 32
+            # PowerPoint REQUIRES app.Visible = 1 for the render engine to process slides
+            app.Visible = 1
+            
+            # Open args: FileName, ReadOnly (-1), Untitled (0), WithWindow (-1)
+            doc = app.Presentations.Open(abs_input, -1, 0, -1)
+            
+            # SaveAs with format 32 (ppSaveAsPDF) is universally supported
+            doc.SaveAs(abs_output, 32)
 
         return True
 
@@ -101,7 +92,6 @@ def convert_office_to_pdf_safe(input_path, output_path, office_app):
                 app.Quit()
             except Exception:
                 pass
-        # Uninitialize COM for this thread
         pythoncom.CoUninitialize()
 
 # ---------- GUI Application ----------
@@ -189,7 +179,6 @@ class OfficeToPDFConverter:
         self.window.dnd_bind("<<Drop>>", self.on_drop)
 
     def on_drop(self, event):
-        # Safely parse dropped files containing spaces or special characters using Tkinter's native splitlist
         files = self.window.tk.splitlist(event.data)
         if files:
             self._set_file(files[0])
@@ -322,7 +311,7 @@ class OfficeToPDFConverter:
         results = []
         for app_name in ["Word", "Excel", "PowerPoint"]:
             try:
-                app = win32com.client.Dispatch(f"{app_name}.Application")
+                app = win32com.client.dynamic.Dispatch(f"{app_name}.Application")
                 ver = app.Version
                 results.append(f"✅ {app_name}: Found (version {ver})")
                 app.Quit()
