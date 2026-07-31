@@ -1,14 +1,14 @@
 import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD  # for drag & drop
-import sys
 
 try:
     import win32com.client
+    import pythoncom  # Required for multithreaded COM automation
 except ImportError:
-    # Show a simple message if we’re not in a full GUI yet
     root = tk.Tk()
     root.withdraw()
     messagebox.showerror(
@@ -43,63 +43,85 @@ FILE_DIALOG_PATTERNS = [
 
 # ---------- Core Conversion Logic ----------
 def convert_office_to_pdf_safe(input_path, output_path, office_app):
-    """Convert a file using the appropriate Office application (read-only)."""
+    """Convert a file using the appropriate Office application in a thread-safe context."""
+    # COM servers require absolute, normalized Windows paths
+    abs_input = os.path.abspath(input_path)
+    abs_output = os.path.abspath(output_path)
+
+    # Initialize COM library for the background thread
+    pythoncom.CoInitialize()
+
     app = None
     doc = None
     try:
         app = win32com.client.Dispatch(f"{office_app}.Application")
-        app.Visible = False
 
         if office_app == "Word":
-            doc = app.Documents.Open(input_path, ReadOnly=True)
-            doc.ExportAsFixedFormat(output_path, ExportFormat=17)  # wdExportFormatPDF
+            app.Visible = False
+            app.DisplayAlerts = 0  # wdAlertsNone (suppress conversion prompts)
+            doc = app.Documents.Open(
+                abs_input,
+                ReadOnly=True,
+                ConfirmConversions=False,
+                AddToRecentFiles=False
+            )
+            doc.ExportAsFixedFormat(abs_output, ExportFormat=17)  # wdExportFormatPDF = 17
 
         elif office_app == "Excel":
-            doc = app.Workbooks.Open(input_path, ReadOnly=True)
-            doc.ExportAsFixedFormat(0, output_path)  # xlTypePDF
+            app.Visible = False
+            app.DisplayAlerts = False
+            doc = app.Workbooks.Open(
+                abs_input,
+                ReadOnly=True,
+                UpdateLinks=0,
+                AddToMru=False
+            )
+            doc.ExportAsFixedFormat(0, abs_output)  # xlTypePDF = 0
 
         elif office_app == "PowerPoint":
-            doc = app.Presentations.Open(input_path, ReadOnly=True)
-            doc.ExportAsFixedFormat(output_path, 32)  # ppSaveAsPDF
+            app.DisplayAlerts = 1  # ppAlertsNone = 1
+            doc = app.Presentations.Open(
+                abs_input,
+                ReadOnly=True,
+                Untitled=False,
+                WithWindow=False
+            )
+            doc.ExportAsFixedFormat(abs_output, 32)  # ppSaveAsPDF = 32
 
         return True
-
-    except Exception as e:
-        raise e
 
     finally:
         if doc:
             try:
-                doc.Close(SaveChanges=False)
-            except:
+                doc.Close()
+            except Exception:
                 pass
         if app:
             try:
                 app.Quit()
-            except:
+            except Exception:
                 pass
+        # Uninitialize COM for this thread
+        pythoncom.CoUninitialize()
 
 # ---------- GUI Application ----------
 class OfficeToPDFConverter:
     def __init__(self):
-        # Use TkinterDnD for drag‑and‑drop support
         self.window = TkinterDnD.Tk()
         self.window.title("Family PDF Tool v2.0")
         self.window.geometry("600x360")
         self.window.resizable(False, False)
 
-        # Try to set a window icon (uses a built‑in Windows icon)
         try:
             self.window.iconbitmap(default="C:\\Windows\\System32\\shell32.dll")
-        except:
-            pass  # silently ignore if not available
+        except Exception:
+            pass
 
-        # Font fallback
         for family in ("Segoe UI", "Tahoma", "Arial"):
             try:
                 self.window.option_add("*Font", (family, 10))
                 break
-            except:
+            except Exception:
                 continue
 
         self.filepath = tk.StringVar()
@@ -107,14 +129,11 @@ class OfficeToPDFConverter:
         self.filetype_display = tk.StringVar()
 
         self._converting = False
-
-        # Checkbox to open PDF after conversion
         self.open_after_var = tk.BooleanVar(value=True)
 
         self._setup_ui()
         self._setup_drag_drop()
 
-        # Bind hidden diagnostic (Ctrl+T) to test Office availability
         self.window.bind("<Control-t>", lambda e: self._diagnose_office())
 
     # ---------- UI Construction ----------
@@ -122,7 +141,6 @@ class OfficeToPDFConverter:
         main_frame = tk.Frame(self.window, padx=25, pady=20)
         main_frame.pack(expand=True, fill="both")
 
-        # Title
         title = tk.Label(main_frame, text="Office to PDF Converter",
                          font=("Segoe UI", 15, "bold"))
         title.pack(pady=(0, 5))
@@ -131,7 +149,6 @@ class OfficeToPDFConverter:
                             font=("Segoe UI", 9), fg="gray")
         subtitle.pack(pady=(0, 15))
 
-        # File display area (gives visual feedback for drag & drop)
         self.file_label = tk.Label(main_frame, textvariable=self.filename_display,
                                    wraplength=500, anchor="center", justify="center",
                                    bg="#f0f0f0", relief="ridge", padx=10, pady=8)
@@ -141,19 +158,16 @@ class OfficeToPDFConverter:
                                    fg="#0078D4", font=("Segoe UI", 9, "bold"))
         self.type_label.pack(pady=(0, 5))
 
-        # Progress & status
         self.status_var = tk.StringVar()
         self.status_label = tk.Label(main_frame, textvariable=self.status_var, fg="gray")
         self.status_label.pack(pady=(0, 3))
 
         self.progress = ttk.Progressbar(main_frame, mode="indeterminate", length=300)
 
-        # Checkbox: open PDF after conversion
         self.open_cb = tk.Checkbutton(main_frame, text="Open PDF after conversion",
                                       variable=self.open_after_var)
         self.open_cb.pack(pady=(5, 0))
 
-        # Buttons row
         btn_frame = tk.Frame(main_frame)
         btn_frame.pack(pady=15)
 
@@ -171,21 +185,14 @@ class OfficeToPDFConverter:
         self.convert_btn.grid(row=0, column=2, padx=4)
 
     def _setup_drag_drop(self):
-        """Enable drag‑and‑drop from Windows Explorer."""
         self.window.drop_target_register(DND_FILES)
         self.window.dnd_bind("<<Drop>>", self.on_drop)
 
     def on_drop(self, event):
-        """Handle a dropped file."""
-        # event.data may contain multiple files inside { } if multiple drops;
-        # we only take the first one.
-        raw = event.data.strip()
-        if raw.startswith("{") and raw.endswith("}"):
-            raw = raw[1:-1]
-        files = raw.split()
+        # Safely parse dropped files containing spaces or special characters using Tkinter's native splitlist
+        files = self.window.tk.splitlist(event.data)
         if files:
-            path = files[0]
-            self._set_file(path)
+            self._set_file(files[0])
 
     def select_file(self):
         path = filedialog.askopenfilename(
@@ -196,7 +203,6 @@ class OfficeToPDFConverter:
             self._set_file(path)
 
     def _set_file(self, path):
-        """Common method to load a file and update UI."""
         ext = os.path.splitext(path)[1].lower()
         office_app = SUPPORTED_FORMATS.get(ext)
 
@@ -215,7 +221,6 @@ class OfficeToPDFConverter:
             )
 
     def clear_file(self):
-        """Reset the selection."""
         self.filepath.set("")
         self.filename_display.set("Drop a file here or click 'Select File'")
         self.filetype_display.set("")
@@ -233,7 +238,6 @@ class OfficeToPDFConverter:
 
         output_path = os.path.splitext(input_path)[0] + ".pdf"
 
-        # Overwrite check
         if os.path.exists(output_path):
             if not messagebox.askyesno(
                 "File Exists",
@@ -272,11 +276,10 @@ class OfficeToPDFConverter:
         if success:
             msg = f"PDF saved as:\n{info}"
             if self.open_after_var.get():
-                os.startfile(info)  # opens the PDF with default viewer
+                os.startfile(info)
             messagebox.showinfo("Success", msg)
         else:
             error_text = f"Conversion failed.\n\n{info}"
-            # Smart hints
             lower_info = info.lower()
             if "excel" in lower_info or "xls" in lower_info:
                 hint = "Microsoft Excel"
@@ -303,7 +306,6 @@ class OfficeToPDFConverter:
             self.progress.start(10)
         else:
             self.select_btn.config(state="normal")
-            # Clear button only if a file is loaded
             if self.filepath.get():
                 self.clear_btn.config(state="normal")
             else:
@@ -316,7 +318,7 @@ class OfficeToPDFConverter:
 
     # ---------- Hidden Diagnostic (Ctrl+T) ----------
     def _diagnose_office(self):
-        """Quick test of Office apps – triggered by Ctrl+T."""
+        pythoncom.CoInitialize()
         results = []
         for app_name in ["Word", "Excel", "PowerPoint"]:
             try:
@@ -324,8 +326,9 @@ class OfficeToPDFConverter:
                 ver = app.Version
                 results.append(f"✅ {app_name}: Found (version {ver})")
                 app.Quit()
-            except:
+            except Exception:
                 results.append(f"❌ {app_name}: Not found")
+        pythoncom.CoUninitialize()
         messagebox.showinfo("Office Availability", "\n".join(results))
 
     def run(self):
